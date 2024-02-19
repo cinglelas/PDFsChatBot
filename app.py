@@ -7,7 +7,10 @@ from langchain_community.embeddings import HuggingFaceInstructEmbeddings
 from langchain_community.vectorstores import faiss
 from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationalRetrievalChain
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain.chains.combine_documents import create_stuff_documents_chain
 from htmlTemplates import css, bot_template, user_template
 
 def get_pdf_text(pdf_docs):
@@ -37,18 +40,29 @@ def get_vectorstore(text_chunks):
 
 def get_conversation_chain(vectorstore):
     llm = ChatOpenAI()
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    conversation_chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=vectorstore.as_retriever(),
-        memory=memory
-    )
+    prompt = ChatPromptTemplate.from_messages([
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("user", "{input}"),
+        ("user", "Given the above conversation, generate a search query to look up in order to get information relevant to the conversation")
+    ])
+    retriever_chain = create_history_aware_retriever(llm, vectorstore.as_retriever(), prompt)
 
-    return conversation_chain
+    doc_prompt = ChatPromptTemplate.from_messages([
+        ("system", "Answer the user's questions based on the below context:\n\n{context}"),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("user", "{input}")
+    ])
+    document_chain = create_stuff_documents_chain(llm, doc_prompt)
+    retrival_chain = create_retrieval_chain(retriever_chain, document_chain)
+    return retrival_chain
 
 def handle_user_input(user_input):
-    response = st.session_state.conversation({'question': user_input})
-    st.session_state.chat_history = response["chat_history"]
+    response = st.session_state.conversation.invoke({
+        "chat_history": st.session_state.chat_history,
+        "input": user_input
+    })
+    st.session_state.chat_history.append(HumanMessage(user_input))
+    st.session_state.chat_history.append(AIMessage(response["answer"]))
     for i, message in enumerate(st.session_state.chat_history):
         if i % 2 == 0:
             st.write(user_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
@@ -73,7 +87,7 @@ def main():
     if "conversation" not in st.session_state:
         st.session_state.conversation = None
     if "chat_history" not in st.session_state:
-        st.session_state.chat_history = None
+        st.session_state.chat_history = []
     
 
     with st.sidebar:
@@ -90,7 +104,7 @@ def main():
                 # transform chunks into embeddings
                 vectorstore = get_vectorstore(text_chunks)
 
-                # create conversation chain
+                # create conversation chain (retrival chain)
                 conversation = get_conversation_chain(vectorstore)
 
                 st.session_state.conversation = conversation
