@@ -1,16 +1,16 @@
 import streamlit as st
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv 
-from langchain.text_splitter import CharacterTextSplitter
+from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.embeddings import HuggingFaceInstructEmbeddings
 from langchain_community.vectorstores import faiss
 from langchain_openai import ChatOpenAI
-from langchain.memory import ConversationBufferMemory
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_community.document_loaders import WebBaseLoader
 from htmlTemplates import css, bot_template, user_template
 
 def get_pdf_text(pdf_docs):
@@ -32,10 +32,22 @@ def get_text_chunks(raw_text):
     chunks = text_splitter.split_text(raw_text)
     return chunks
 
-def get_vectorstore(text_chunks):
+def get_vectorstore_from_texts(text_chunks):
     embeddings = OpenAIEmbeddings()                # openai embeddings, fast but charge
     # embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")    # instructor embeddings, slow but free
     vectorstore = faiss.FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+    return vectorstore
+
+def get_website_docs(website):
+    loader = WebBaseLoader(website)
+    return loader.load()
+
+def get_vectorstore_from_docs(docs):
+    text_splitter = RecursiveCharacterTextSplitter()
+    documents = text_splitter.split_documents(docs)
+
+    embeddings = OpenAIEmbeddings()                # openai embeddings, fast but charge
+    vectorstore = faiss.FAISS.from_documents(documents, embeddings)
     return vectorstore
 
 def get_conversation_chain(vectorstore):
@@ -102,12 +114,24 @@ def main():
                 text_chunks = get_text_chunks(raw_text)
 
                 # transform chunks into embeddings
-                vectorstore = get_vectorstore(text_chunks)
+                vectorstore = get_vectorstore_from_texts(text_chunks)
 
                 # create conversation chain (retrival chain)
-                conversation = get_conversation_chain(vectorstore)
+                st.session_state.conversation = get_conversation_chain(vectorstore)
 
-                st.session_state.conversation = conversation
+        st.subheader("Website")
+        website_input = st.text_input("Please enter the website url and click 'Fetch'")
+        if st.button("Fetch"):
+            with st.spinner("Fetching"):
+                # get document from website
+                website_docs = get_website_docs(website_input)
+
+                # get vectorstore from documents
+                vectorstore = get_vectorstore_from_docs(website_docs)
+
+                # create conversation chain (retrival chain)
+                st.session_state.conversation = get_conversation_chain(vectorstore)
+
 
 if __name__ == "__main__":
     main()
