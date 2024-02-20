@@ -11,6 +11,9 @@ from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain import hub
+from langchain.agents import create_openai_functions_agent, AgentExecutor
 from htmlTemplates import css, bot_template, user_template
 
 def get_pdf_text(pdf_docs):
@@ -51,35 +54,46 @@ def get_vectorstore_from_docs(docs):
     return vectorstore
 
 def get_conversation_chain(vectorstore):
-    llm = ChatOpenAI()
+    if st.session_state.llm == None:
+        st.session_state.llm = ChatOpenAI()
     prompt = ChatPromptTemplate.from_messages([
         MessagesPlaceholder(variable_name="chat_history"),
         ("user", "{input}"),
         ("user", "Given the above conversation, generate a search query to look up in order to get information relevant to the conversation")
     ])
-    retriever_chain = create_history_aware_retriever(llm, vectorstore.as_retriever(), prompt)
+    retriever_chain = create_history_aware_retriever(st.session_state.llm, vectorstore.as_retriever(), prompt)
 
     doc_prompt = ChatPromptTemplate.from_messages([
         ("system", "Answer the user's questions based on the below context:\n\n{context}"),
         MessagesPlaceholder(variable_name="chat_history"),
         ("user", "{input}")
     ])
-    document_chain = create_stuff_documents_chain(llm, doc_prompt)
+    document_chain = create_stuff_documents_chain(st.session_state.llm, doc_prompt)
     retrival_chain = create_retrieval_chain(retriever_chain, document_chain)
     return retrival_chain
 
 def handle_user_input(user_input):
-    response = st.session_state.conversation.invoke({
-        "chat_history": st.session_state.chat_history,
-        "input": user_input
-    })
-    st.session_state.chat_history.append(HumanMessage(user_input))
-    st.session_state.chat_history.append(AIMessage(response["answer"]))
-    for i, message in enumerate(st.session_state.chat_history):
-        if i % 2 == 0:
-            st.write(user_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
+
+    if not st.session_state.agent_mode:
+        if not st.session_state.conversation:
+            st.info("Please upload PDFs or enter url.")
         else:
-            st.write(bot_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
+            response = st.session_state.conversation.invoke({
+                "chat_history": st.session_state.chat_history,
+                "input": user_input
+            })
+            st.session_state.chat_history.append(HumanMessage(user_input))
+            st.session_state.chat_history.append(AIMessage(response["answer"]))
+        
+    else:
+        response = st.session_state.agent_executor.invoke({
+            "chat_history": st.session_state.chat_history,
+            "input": user_input
+        })
+        st.session_state.chat_history.append(HumanMessage(user_input))
+        st.session_state.chat_history.append(AIMessage(response["output"]))
+    
+
 
 
 
@@ -90,9 +104,10 @@ def main():
     st.set_page_config(page_title="Chat with multiple PDFs", page_icon=":books:")
     st.write(css, unsafe_allow_html=True)
     st.header("chat with virtual girlfriend :books:")
-    user_input = st.text_input("Ask something to ChatBot")
 
-    if user_input:
+    user_input = st.chat_input("Type your messages here...")
+
+    if user_input is not None and user_input != "":
         handle_user_input(user_input)
 
     # initialization
@@ -100,6 +115,35 @@ def main():
         st.session_state.conversation = None
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+    if "llm" not in st.session_state:
+        st.session_state.llm = None
+    if "agent_mode" not in st.session_state:
+        st.session_state.agent_mode = False
+    if "agent_executor" not in st.session_state:
+        st.session_state.agent_executor = None
+
+    col1, col2 = st.columns(2)  # Create two columns
+
+    if col1.button("RAG"):
+        st.session_state.agent_mode = False
+        st.session_state.chat_history = []
+        st.info("changed to RAG mode")
+    
+    if col2.button("Agent"):
+        st.session_state.agent_mode = True
+        st.session_state.chat_history = []
+        st.info("changed to Agent mode")
+
+        search = TavilySearchResults()
+        tools = [search]
+
+        prompt = hub.pull("hwchase17/openai-functions-agent")
+        if st.session_state.llm == None:
+            st.session_state.llm = ChatOpenAI()
+        agent = create_openai_functions_agent(st.session_state.llm, tools, prompt)
+        agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+        st.session_state.agent_executor = agent_executor
+    
     
 
     with st.sidebar:
@@ -131,6 +175,13 @@ def main():
 
                 # create conversation chain (retrival chain)
                 st.session_state.conversation = get_conversation_chain(vectorstore)
+
+    
+    for message in st.session_state.chat_history:
+            if isinstance(message, AIMessage):
+                st.write(bot_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
+            else:
+                st.write(user_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
